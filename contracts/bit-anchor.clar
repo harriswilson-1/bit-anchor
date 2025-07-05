@@ -285,3 +285,69 @@
     (ok true)
   )
 )
+
+;; READ-ONLY QUERY FUNCTIONS
+
+(define-read-only (get-vault-token-info (token-id uint))
+  (map-get? vault-tokens { token-id: token-id })
+)
+
+(define-read-only (get-marketplace-listing (token-id uint))
+  (map-get? marketplace-listings { token-id: token-id })
+)
+
+(define-read-only (get-fractional-ownership-data
+    (token-id uint)
+    (shareholder principal)
+  )
+  (map-get? fractional-token-ownership {
+    token-id: token-id,
+    shareholder: shareholder,
+  })
+)
+
+(define-read-only (get-staking-rewards-info (token-id uint))
+  (map-get? staking-yield-tracking { token-id: token-id })
+)
+
+(define-read-only (calculate-accumulated-rewards (token-id uint))
+  (let (
+      (token-data (unwrap! (get-vault-token-info token-id) ERR_INVALID_TOKEN))
+      (rewards-data (unwrap! (get-staking-rewards-info token-id) ERR_NOT_STAKED))
+      (blocks-actively-staked (- stacks-block-height (get staking-start-block token-data)))
+      (annual-blocks-estimate u52560) ;; Approximate blocks per year on Stacks
+      (yield-per-block (/ (var-get annual-yield-rate) annual-blocks-estimate))
+      (newly-generated-rewards (* blocks-actively-staked yield-per-block))
+    )
+    (ok (+ (get accumulated-rewards rewards-data) newly-generated-rewards))
+  )
+)
+
+(define-read-only (get-protocol-statistics)
+  {
+    total-tokens: (var-get total-token-supply),
+    total-staked: (var-get total-staked-assets),
+    protocol-fee: (var-get protocol-fee-rate),
+    minimum-collateral: (var-get minimum-collateral-ratio),
+    current-yield-rate: (var-get annual-yield-rate),
+  }
+)
+
+;; INTERNAL REWARD DISTRIBUTION MECHANISM
+
+(define-private (distribute-staking-rewards (token-id uint))
+  (let (
+      (calculated-rewards (unwrap! (calculate-accumulated-rewards token-id) ERR_NOT_STAKED))
+      (token-data (unwrap! (get-vault-token-info token-id) ERR_INVALID_TOKEN))
+    )
+    (asserts! (get is-actively-staked token-data) ERR_NOT_STAKED)
+    (map-set staking-yield-tracking { token-id: token-id } {
+      accumulated-rewards: u0,
+      last-claim-block: stacks-block-height,
+    })
+    ;; Distribute rewards to token owner
+    (as-contract (stx-transfer? calculated-rewards (as-contract tx-sender)
+      (get owner token-data)
+    ))
+  )
+)
